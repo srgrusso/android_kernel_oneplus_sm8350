@@ -128,8 +128,7 @@ void escape_to_root(void)
 	// setup capabilities
 	// we need CAP_DAC_READ_SEARCH becuase `/data/adb/ksud` is not accessible for non root process
 	// we add it here but don't add it to cap_inhertiable, it would be dropped automaticly after exec!
-	u64 cap_for_ksud =
-		profile->capabilities.effective | CAP_DAC_READ_SEARCH;
+	u64 cap_for_ksud = profile->capabilities.effective | CAP_DAC_READ_SEARCH;
 	memcpy(&cred->cap_effective, &cap_for_ksud,
 	       sizeof(cred->cap_effective));
 	memcpy(&cred->cap_inheritable, &profile->capabilities.effective,
@@ -244,7 +243,7 @@ int ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 #ifdef CONFIG_KSU_DEBUG
 			pr_err("become_manager: copy param err\n");
 #endif
-			goto block;
+			return 0;
 		}
 
 		// for user 0, it is /data/data
@@ -262,7 +261,7 @@ int ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 
 		if (startswith(param, (char *)prefix) != 0) {
 			pr_info("become_manager: invalid param: %s\n", param);
-			goto block;
+			return 0;
 		}
 
 		// stat the param, app must have permission to do this
@@ -270,13 +269,12 @@ int ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 		struct path path;
 		if (kern_path(param, LOOKUP_DIRECTORY, &path)) {
 			pr_err("become_manager: kern_path err\n");
-			goto block;
+			return 0;
 		}
-		uid_t inode_uid = path.dentry->d_inode->i_uid.val;
-		path_put(&path);
-		if (inode_uid != current_uid().val) {
+		if (path.dentry->d_inode->i_uid.val != current_uid().val) {
 			pr_err("become_manager: path uid != current uid\n");
-			goto block;
+			path_put(&path);
+			return 0;
 		}
 		char *pkg = param + strlen(prefix);
 		pr_info("become_manager: param pkg: %s\n", pkg);
@@ -286,10 +284,8 @@ int ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 			if (copy_to_user(result, &reply_ok, sizeof(reply_ok))) {
 				pr_err("become_manager: prctl reply error\n");
 			}
-			return 0;
 		}
-	block:
-		last_failed_uid = current_uid().val;
+		path_put(&path);
 		return 0;
 	}
 
@@ -573,13 +569,11 @@ int ksu_handle_setuid(struct cred *new, const struct cred *old)
 	// when we umount for such process, that is a disaster!
 	bool is_zygote_child = is_zygote(old->security);
 	if (!is_zygote_child) {
-		pr_info("handle umount ignore non zygote child: %d\n",
-			current->pid);
+		pr_info("handle umount ignore non zygote child: %d\n", current->pid);
 		return 0;
 	}
 	// umount the target mnt
-	pr_info("handle umount for uid: %d, pid: %d\n", new_uid.val,
-		current->pid);
+	pr_info("handle umount for uid: %d, pid: %d\n", new_uid.val, current->pid);
 
 	// fixme: use `collect_mounts` and `iterate_mount` to iterate all mountpoint and
 	// filter the mountpoint whose target is `/data/adb`
