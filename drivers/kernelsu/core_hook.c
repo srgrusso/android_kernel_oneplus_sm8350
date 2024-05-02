@@ -4,7 +4,6 @@
 #include "linux/err.h"
 #include "linux/init.h"
 #include "linux/init_task.h"
-#include "linux/irqflags.h"
 #include "linux/kallsyms.h"
 #include "linux/kernel.h"
 #include "linux/kprobes.h"
@@ -53,11 +52,16 @@ static inline bool is_allow_su()
 	return ksu_is_allow_uid(current_uid().val);
 }
 
-static inline bool is_unsupported_uid(uid_t uid)
+static inline bool is_isolated_uid(uid_t uid)
 {
-#define LAST_APPLICATION_UID 19999
+#define FIRST_ISOLATED_UID 99000
+#define LAST_ISOLATED_UID 99999
+#define FIRST_APP_ZYGOTE_ISOLATED_UID 90000
+#define LAST_APP_ZYGOTE_ISOLATED_UID 98999
 	uid_t appid = uid % 100000;
-	return appid > LAST_APPLICATION_UID;
+	return (appid >= FIRST_ISOLATED_UID && appid <= LAST_ISOLATED_UID) ||
+	       (appid >= FIRST_APP_ZYGOTE_ISOLATED_UID &&
+		appid <= LAST_APP_ZYGOTE_ISOLATED_UID);
 }
 
 static struct group_info root_groups = { .usage = ATOMIC_INIT(2) };
@@ -215,8 +219,8 @@ int ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 		return 0;
 	}
 
-	// always ignore unsupported app uid, such as isolated uid, sdk sandbox uid
-	if (is_unsupported_uid(current_uid().val)) {
+	// always ignore isolated app uid
+	if (is_isolated_uid(current_uid().val)) {
 		return 0;
 	}
 
@@ -318,15 +322,6 @@ int ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
 		if (is_manager() || 0 == current_uid().val) {
 			u32 version = KERNEL_SU_VERSION;
 			if (copy_to_user(arg3, &version, sizeof(version))) {
-				pr_err("prctl reply error, cmd: %lu\n", arg2);
-			}
-#ifdef MODULE
-			u32 is_lkm = 0x1;
-#else
-			u32 is_lkm = 0x0;
-#endif
-			if (arg4 &&
-			    copy_to_user(arg4, &is_lkm, sizeof(is_lkm))) {
 				pr_err("prctl reply error, cmd: %lu\n", arg2);
 			}
 		}
@@ -518,7 +513,7 @@ static bool should_umount(struct path *path)
 
 static void ksu_umount_mnt(struct path *path, int flags)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0) || defined(KSU_UMOUNT)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 	int err = path_umount(path, flags);
 	if (err) {
 		pr_info("umount %s failed: %d\n", path->dentry->d_iname, err);
@@ -568,7 +563,7 @@ int ksu_handle_setuid(struct cred *new, const struct cred *old)
 		return 0;
 	}
 
-	if (!is_appuid(new_uid) || is_unsupported_uid(new_uid.val)) {
+	if (!is_appuid(new_uid) || is_isolated_uid(new_uid.val)) {
 		// pr_info("handle setuid ignore non application or isolated uid: %d\n", new_uid.val);
 		return 0;
 	}
@@ -721,7 +716,6 @@ static int ksu_task_fix_setuid(struct cred *new, const struct cred *old,
 	return ksu_handle_setuid(new, old);
 }
 
-#ifndef MODULE
 static struct security_hook_list ksu_hooks[] = {
 	LSM_HOOK_INIT(task_prctl, ksu_task_prctl),
 	LSM_HOOK_INIT(inode_rename, ksu_inode_rename),
@@ -741,7 +735,7 @@ void __init ksu_lsm_hook_init(void)
 #endif
 }
 
-#else
+#ifdef MODULE
 static int override_security_head(void *head, const void *new_head, size_t len)
 {
 	unsigned long base = (unsigned long)head & PAGE_MASK;
@@ -759,9 +753,7 @@ static int override_security_head(void *head, const void *new_head, size_t len)
 	if (!addr) {
 		return -ENOMEM;
 	}
-	local_irq_disable();
 	memcpy(addr + offset, new_head, len);
-	local_irq_enable();
 	vunmap(addr);
 	return 0;
 }
@@ -862,7 +854,7 @@ static void *find_head_addr(void *security_ptr, int *index)
 		}                                                              \
 	} while (0)
 
-void __init ksu_lsm_hook_init(void)
+void __init ksu_lsm_hook_init_hack(void)
 {
 	void *cap_prctl = GET_SYMBOL_ADDR(cap_task_prctl);
 	void *prctl_head = find_head_addr(cap_prctl, NULL);
@@ -911,10 +903,20 @@ void __init ksu_lsm_hook_init(void)
 
 void __init ksu_core_init(void)
 {
+#ifndef MODULE
+	pr_info("ksu_lsm_hook_init\n");
 	ksu_lsm_hook_init();
+
+#else
+	pr_info("ksu_lsm_hook_init hack!!!!\n");
+	ksu_lsm_hook_init_hack();
+#endif
 }
 
 void ksu_core_exit(void)
 {
+#ifndef MODULE
 	pr_info("ksu_kprobe_exit\n");
+	ksu_kprobe_exit();
+#endif
 }
